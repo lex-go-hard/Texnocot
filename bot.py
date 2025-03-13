@@ -1,16 +1,22 @@
 import vk_api
 from vk_api.bot_longpoll import VkBotLongPoll, VkBotEventType
 import sqlite3
-from datetime import datetime
 from dotenv import load_dotenv
 import os
+import json
 
 # Загрузка переменных окружения
 load_dotenv("keys.env")
 GROUP_TOKEN = os.getenv('GROUP_TOKEN')
-GROUP_ID = int((os.getenv('GROUP_ID')))
+GROUP_ID = int(os.getenv('GROUP_ID'))  # Положительный ID группы
 ADMIN_ID = int(os.getenv('ADMIN_ID'))
 ADMIN_ID2 = int(os.getenv('ADMIN_ID2'))
+USER_TOKEN = os.getenv('USER_TOKEN')  # Токен пользователя
+
+# Подключение к базе данных
+conn = sqlite3.connect('bot_db.sqlite')
+cursor = conn.cursor()
+
 
 # ✅ Функция для создания таблиц, если их нет
 def create_tables():
@@ -31,9 +37,6 @@ def create_tables():
     conn.commit()
     print("✅ Таблицы проверены/созданы.")
 
-# Подключение к базе данных
-conn = sqlite3.connect('bot_db.sqlite')
-cursor = conn.cursor()
 
 # 📄 Создание таблиц при запуске
 create_tables()
@@ -43,6 +46,7 @@ vk_session = vk_api.VkApi(token=GROUP_TOKEN)
 longpoll = VkBotLongPoll(vk_session, GROUP_ID)
 vk = vk_session.get_api()
 
+
 # 📩 Функция для отправки сообщений
 def send_message(peer_id, text):
     vk.messages.send(
@@ -50,6 +54,7 @@ def send_message(peer_id, text):
         message=text,
         random_id=0
     )
+
 
 # 📊 Получение статистики
 def get_admin_stats():
@@ -62,10 +67,12 @@ def get_admin_stats():
     ''')
     return cursor.fetchall()
 
+
 # 📨 Функция для получения списка подписчиков
 def get_group_members():
     members = vk.groups.getMembers(group_id=GROUP_ID)['items']
     return members
+
 
 # Флаг для ожидания сообщения для рассылки
 awaiting_news_message = False
@@ -76,6 +83,10 @@ awaiting_poll_options = False
 awaiting_poll_settings = False
 poll_question = ""
 poll_options = []
+
+# Инициализация пользовательского VK API для создания опроса
+user_vk_session = vk_api.VkApi(token=USER_TOKEN)
+user_vk = user_vk_session.get_api()
 
 # 🛠️ Основной цикл обработки событий
 for event in longpoll.listen():
@@ -96,25 +107,6 @@ for event in longpoll.listen():
             send_message(peer_id, response)
             continue
 
-        # 👨‍💻 Обработка команды админа /news
-        if msg_text == "/news" and (user_id == ADMIN_ID or user_id == ADMIN_ID2):
-            send_message(peer_id, "Введите сообщение для рассылки:")
-            awaiting_news_message = True
-            continue
-
-        # Если бот ожидает сообщение для рассылки
-        if awaiting_news_message and (user_id == ADMIN_ID or user_id == ADMIN_ID2):
-            news_message = msg_text
-            members = get_group_members()
-            for member in members:
-                try:
-                    send_message(member, news_message)
-                except Exception as e:
-                    print(f"Ошибка при отправке сообщения пользователю {member}: {e}")
-            send_message(peer_id, "✅ Рассылка завершена.")
-            awaiting_news_message = False
-            continue
-
         # 👨‍💻 Обработка команды админа /poll
         if msg_text == "/poll" and (user_id == ADMIN_ID or user_id == ADMIN_ID2):
             send_message(peer_id, "Введите вопрос для опроса:")
@@ -133,42 +125,46 @@ for event in longpoll.listen():
         if awaiting_poll_options and (user_id == ADMIN_ID or user_id == ADMIN_ID2):
             poll_options = [option.strip() for option in msg_text.split(';')]
             send_message(peer_id, "Введите характеристики опроса (цифры через пробел):\n"
-                                 "1. Анонимный опрос\n"
-                                 "2. Выбор нескольких вариантов\n"
-                                 "3. Запретить отмену голоса\n"
-                                 "Если таких характеристик нет, напишите 0.")
+                                  "1. Анонимный опрос\n"
+                                  "2. Выбор нескольких вариантов\n"
+                                  "3. Запретить отмену голоса\n"
+                                  "Если таких характеристик нет, напишите 0.")
             awaiting_poll_options = False
             awaiting_poll_settings = True
             continue
 
         # Если бот ожидает характеристики опроса
         if awaiting_poll_settings and (user_id == ADMIN_ID or user_id == ADMIN_ID2):
-            settings = msg_text.split()
+            settings = msg_text.split(" ")
             is_anonymous = '1' in settings
             is_multiple = '2' in settings
             disable_unvote = '3' in settings
 
             try:
-                # Создание опроса
-                poll = vk.polls.create(
+                # Создание JSON-строки для вариантов ответов
+                answers_json = json.dumps([option for option in poll_options], ensure_ascii=False)
+
+                # Создание опроса через user-token
+                poll = user_vk.polls.create(
                     question=poll_question,
-                    add_answers=poll_options,
-                    owner_id=-GROUP_ID,  # Отрицательный ID для группы
+                    add_answers=answers_json,  # Передаем JSON-строку с вариантами ответа
+                    owner_id=ADMIN_ID,  # Создаем от имени администратора
                     is_anonymous=is_anonymous,
                     is_multiple=is_multiple,
                     disable_unvote=disable_unvote
                 )
 
-                # Создание поста с опросом
+                # Создание поста с опросом в группе
                 post = vk.wall.post(
                     owner_id=-GROUP_ID,  # Отрицательный ID для группы
-                    message="Пожалуйста пройдите опрос!",
+                    message="Пожалуйста, пройдите опрос!",
                     attachments=f"poll{poll['owner_id']}_{poll['id']}"
                 )
 
                 send_message(peer_id, "✅ Опрос создан и опубликован на стене сообщества.")
             except Exception as e:
                 send_message(peer_id, f"❌ Ошибка при создании опроса: {e}")
+                print(f"Ошибка при создании опроса: {e}")
 
             awaiting_poll_settings = False
             continue
