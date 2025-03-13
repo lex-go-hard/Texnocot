@@ -4,7 +4,7 @@ import sqlite3
 from datetime import datetime
 from dotenv import load_dotenv
 import os
-#qwertyuiui
+
 # Загрузка переменных окружения
 load_dotenv("keys.env")
 GROUP_TOKEN = os.getenv('GROUP_TOKEN')
