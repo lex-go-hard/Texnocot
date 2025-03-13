@@ -10,6 +10,7 @@ load_dotenv("keys.env")
 GROUP_TOKEN = os.getenv('GROUP_TOKEN')
 GROUP_ID = int(os.getenv('GROUP_ID'))
 ADMIN_ID = int(os.getenv('ADMIN_ID'))
+ADMIN_ID2 = int(os.getenv('ADMIN_ID2'))
 
 # ✅ Функция для создания таблиц, если их нет
 def create_tables():
@@ -49,8 +50,8 @@ def send_message(peer_id, text):
         message=text,
         random_id=0
     )
-# 📊 Получение статистики
 
+# 📊 Получение статистики
 def get_admin_stats():
     cursor.execute('''
         SELECT keyword, COUNT(*) as count, 
@@ -61,6 +62,13 @@ def get_admin_stats():
     ''')
     return cursor.fetchall()
 
+# 📨 Функция для получения списка подписчиков
+def get_group_members():
+    members = vk.groups.getMembers(group_id=GROUP_ID)['items']
+    return members
+
+# Флаг для ожидания сообщения для рассылки
+awaiting_news_message = False
 
 # 🛠️ Основной цикл обработки событий
 for event in longpoll.listen():
@@ -70,16 +78,34 @@ for event in longpoll.listen():
         user_id = message['from_id']
         peer_id = message['peer_id']
 
-
         print(f"📩 Сообщение: '{msg_text}' от user_id: {user_id} | peer_id: {peer_id}")
 
-        # 👨‍💻 Обработка команды админа
+        # 👨‍💻 Обработка команды админа /stats
         if msg_text == "/stats" and user_id == ADMIN_ID:
             stats = get_admin_stats()
             response = "📊 Статистика вопросов:\n"
             for keyword, count, percent in stats:
                 response += f"- {keyword}: {count} ({round(percent, 2)}%)\n"
             send_message(peer_id, response)
+            continue
+
+        # 👨‍💻 Обработка команды админа /news
+        if msg_text == "/news" and (user_id == ADMIN_ID or user_id == ADMIN_ID2):
+            send_message(peer_id, "Введите сообщение для рассылки:")
+            awaiting_news_message = True
+            continue
+
+        # Если бот ожидает сообщение для рассылки
+        if awaiting_news_message and (user_id == ADMIN_ID or user_id == ADMIN_ID2):
+            news_message = msg_text
+            members = get_group_members()
+            for member in members:
+                try:
+                    send_message(member, news_message)
+                except Exception as e:
+                    print(f"Ошибка при отправке сообщения пользователю {member}: {e}")
+            send_message(peer_id, "✅ Рассылка завершена.")
+            awaiting_news_message = False
             continue
 
         # 🔍 Поиск ключевых слов
