@@ -3,7 +3,7 @@ import sqlite3
 # Подключение к базе данных
 conn = sqlite3.connect('bot_db.sqlite')
 cursor = conn.cursor()
-#qwert
+
 # Данные для вставки
 keywords_data = [
     ('привет', 'Привет! Чем могу помочь?'),
