@@ -67,7 +67,7 @@ def get_admin_stats():
     ''')
     return cursor.fetchall()
 
-
+#
 # 📨 Функция для получения списка подписчиков
 def get_group_members():
     members = vk.groups.getMembers(group_id=GROUP_ID)['items']
