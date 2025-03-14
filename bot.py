@@ -59,10 +59,10 @@ def send_message(peer_id, text):
 # 📊 Получение статистики
 def get_admin_stats():
     cursor.execute('''
-        SELECT keyword, COUNT(*) as count, 
-               (COUNT(*) * 100.0 / (SELECT COUNT(*) FROM message_log)) as percent 
-        FROM message_log 
-        GROUP BY keyword 
+        SELECT keyword, COUNT(*) as count,
+               (COUNT(*) * 100.0 / (SELECT COUNT(*) FROM message_log)) as percent
+        FROM message_log
+        GROUP BY keyword
         ORDER BY count DESC
     ''')
     return cursor.fetchall()
@@ -195,7 +195,7 @@ for event in longpoll.listen():
         if response:
             send_message(peer_id, response)
             cursor.execute('''
-                INSERT INTO message_log (user_id, keyword) 
+                INSERT INTO message_log (user_id, keyword)
                 VALUES (?, ?)
             ''', (user_id, matched_keyword))
         else:
