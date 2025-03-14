@@ -132,7 +132,7 @@ for event in longpoll.listen():
             awaiting_poll_options = False
             awaiting_poll_settings = True
             continue
-
+#
         # Если бот ожидает характеристики опроса
         if awaiting_poll_settings and (user_id == ADMIN_ID or user_id == ADMIN_ID2):
             settings = msg_text.split(" ")
