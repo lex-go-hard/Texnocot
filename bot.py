@@ -99,7 +99,7 @@ for event in longpoll.listen():
         print(f"📩 Сообщение: '{msg_text}' от user_id: {user_id} | peer_id: {peer_id}")
 
         # 👨‍💻 Обработка команды админа /stats
-        if msg_text == "/stats" and user_id == ADMIN_ID:
+        if msg_text == "/stats" and (user_id == ADMIN_ID or user_id == ADMIN_ID2):
             stats = get_admin_stats()
             response = "📊 Статистика вопросов:\n"
             for keyword, count, percent in stats:
@@ -128,7 +128,7 @@ for event in longpoll.listen():
                                   "1. Анонимный опрос\n"
                                   "2. Выбор нескольких вариантов\n"
                                   "3. Запретить отмену голоса\n"
-                                  "Если таких характеристик нет, напишите 0.")
+                                  "Если таких характеристик нет, напишите 0 0 0.")
             awaiting_poll_options = False
             awaiting_poll_settings = True
             continue
@@ -145,14 +145,24 @@ for event in longpoll.listen():
                 answers_json = json.dumps([option for option in poll_options], ensure_ascii=False)
 
                 # Создание опроса через user-token
-                poll = user_vk.polls.create(
-                    question=poll_question,
-                    add_answers=answers_json,  # Передаем JSON-строку с вариантами ответа
-                    owner_id=ADMIN_ID,  # Создаем от имени администратора
-                    is_anonymous=is_anonymous,
-                    is_multiple=is_multiple,
-                    disable_unvote=disable_unvote
-                )
+                if settings[1] != "0":
+                    poll = user_vk.polls.create(
+                        question=poll_question,
+                        add_answers=answers_json,  # Передаем JSON-строку с вариантами ответа
+                        owner_id=ADMIN_ID,  # Создаем от имени администратора
+                        is_anonymous=is_anonymous,
+                        is_multiple=is_multiple,
+                        disable_unvote=disable_unvote
+                    )
+                else:
+                    poll = user_vk.polls.create(
+                        question=poll_question,
+                        add_answers=answers_json,  # Передаем JSON-строку с вариантами ответа
+                        owner_id=ADMIN_ID,  # Создаем от имени администратора
+                        is_anonymous=None,
+                        is_multiple=None,
+                        disable_unvote=None
+                    )
 
                 # Создание поста с опросом в группе
                 post = vk.wall.post(
