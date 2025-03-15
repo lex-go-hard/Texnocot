@@ -49,14 +49,16 @@ def create_tables():
             status TEXT,
             last_seen DATETIME,
             message_count INTEGER DEFAULT 0,
-            is_ignored INTEGER DEFAULT 0
+            is_ignored INTEGER DEFAULT 0,
+            needs_help INTEGER DEFAULT 0 
         )
     ''')
-    # Добавляем колонку is_ignored, если она еще не существует
-    try:
-        cursor.execute("ALTER TABLE users ADD COLUMN is_ignored INTEGER DEFAULT 0")
-    except sqlite3.OperationalError:
-        pass  # Колонка уже существует
+    # Добавляем колонки, если они еще не существуют
+    for column in ['is_ignored', 'needs_help']:
+        try:
+            cursor.execute(f"ALTER TABLE users ADD COLUMN {column} INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
     conn.commit()
     print("✅ Таблицы проверены/созданы.")
 
@@ -154,7 +156,7 @@ def handle_file_upload(file_url, peer_id):
 
 
 # 📩 Функция для отправки сообщений
-def send_message(peer_id, text, keyboard=None):
+def send_message(peer_id, text, keyboard=None, attachment=None):
     params = {
         'peer_id': peer_id,
         'message': str(text),
@@ -162,6 +164,8 @@ def send_message(peer_id, text, keyboard=None):
     }
     if keyboard:
         params['keyboard'] = keyboard
+    if attachment:
+        params['attachment'] = attachment
     vk.messages.send(**params)
 
 
@@ -186,6 +190,19 @@ def can_send_message(user_id):
         return False
 
 
+def get_pending_requests(page=0, per_page=8):
+    offset = page * per_page
+    cursor.execute('''
+        SELECT user_id, first_name, last_name 
+        FROM users 
+        WHERE needs_help = 1 
+        LIMIT ? OFFSET ?
+    ''', (per_page, offset))
+    return cursor.fetchall()
+
+
+
+
 # Инициализация VK API
 vk_session = vk_api.VkApi(token=GROUP_TOKEN)
 longpoll = VkBotLongPoll(vk_session, GROUP_ID)
@@ -204,57 +221,128 @@ for event in longpoll.listen():
         # Обновляем информацию о пользователе
         update_user_info(user_id)
 
-        # Проверяем payload ДО проверки игнора
+        # Проверяем payload до проверки игнора
         if 'payload' in message:
             try:
                 payload = json.loads(message['payload'])
                 if payload.get('action') == "reset_counter":
-                    # Сбрасываем счетчик и статус игнора
-                    cursor.execute("UPDATE users SET message_count = 0, is_ignored = 0 WHERE user_id = ?", (user_id,))
+                    # Сбрасываем счетчик и флаги
+                    cursor.execute(
+                        "UPDATE users SET message_count = 0, is_ignored = 0, needs_help = 0 WHERE user_id = ?",
+                        (user_id,))
+                    conn.commit()
+                    send_message(peer_id, "✅ Ваш счетчик сообщений был сброшен. Спасибо за обращение!")
+                    continue
+
+                elif payload.get('action') == "respond" and user_id in ADMIN_ID:
+                    page = payload.get('page', 0)
+                    users = get_pending_requests(page=page)
+
+                    if not users:
+                        send_message(peer_id, "❌ Нет активных заявок.")
+                        continue
+
+                    keyboard = VkKeyboard(inline=True)
+                    for i, (user_id, first_name, last_name) in enumerate(users):
+                        if i > 0:
+                            keyboard.add_line()
+                        label = f"{first_name} {last_name}"[:50]
+                        keyboard.add_button(
+                            label=label,
+                            color=VkKeyboardColor.SECONDARY,
+                            payload={"action": "select_user", "user_id": user_id}
+                        )
+
+                    total_users = cursor.execute("SELECT COUNT(*) FROM users WHERE needs_help = 1").fetchone()[0]
+                    per_page = 8
+                    if page > 0 or (page + 1) * per_page < total_users:
+                        keyboard.add_line()
+                        if page > 0:
+                            keyboard.add_button(label="← Назад", payload={"action": "respond", "page": page - 1})
+                        if (page + 1) * per_page < total_users:
+                            keyboard.add_button(label="Вперед →", payload={"action": "respond", "page": page + 1})
+
+                    send_message(peer_id, "Выберите пользователя:", keyboard=keyboard.get_keyboard())
+                    continue
+
+                elif payload.get('action') == "select_user" and user_id in ADMIN_ID:
+                    selected_user_id = payload['user_id']
+                    admin_info = vk.users.get(user_ids=user_id, fields='first_name,last_name')[0]
+                    admin_name = f"{admin_info['first_name']} {admin_info['last_name']}"
+
+                    # Устанавливаем флаг is_ignored для пользователя
+                    cursor.execute("UPDATE users SET is_ignored = 1 WHERE user_id = ?", (selected_user_id,))
                     conn.commit()
 
-                    # Получаем информацию о пользователе
-                    cursor.execute("SELECT first_name, last_name FROM users WHERE user_id = ?", (user_id,))
+                    # Отправляем сообщение пользователю с кнопкой
+                    keyboard = VkKeyboard(one_time=True)
+                    keyboard.add_button(
+                        'Я получил помощь',
+                        color=VkKeyboardColor.POSITIVE,
+                        payload=json.dumps({"action": "reset_counter"})
+                    )
+                    try:
+                        if can_send_message(selected_user_id):
+                            send_message(
+                                selected_user_id,
+                                f"Администратор {admin_name} откликнулся на вашу заявку. Нажмите кнопку, когда вопрос будет решен:",
+                                keyboard=keyboard.get_keyboard()
+                            )
+                            send_message(peer_id, "✅ Пользователь уведомлен. Кнопка для подтверждения отправлена.")
+                        else:
+                            send_message(peer_id,
+                                         "❌ Пользователь запретил сообщения от группы. Свяжитесь с ним напрямую.")
+                    except Exception as e:
+                        send_message(peer_id, f"❌ Ошибка при отправке сообщения пользователю: {str(e)}")
+                        print(f"Ошибка при отправке сообщения пользователю {selected_user_id}: {e}")
+
+                    # Уведомляем других администраторов
+                    cursor.execute("SELECT first_name, last_name FROM users WHERE user_id = ?", (selected_user_id,))
                     user_info = cursor.fetchone()
                     if user_info:
                         first_name, last_name = user_info
-                        # Уведомляем админов
+                        mention = f"[id{selected_user_id}|{first_name} {last_name}]"
                         for admin_id in ADMIN_ID:
-                            if can_send_message(admin_id):
-                                send_message(
-                                    admin_id,
-                                    f"Пользователю [id{user_id}|{first_name} {last_name}] уже помогли."
-                                )
-                        send_message(peer_id, "✅ Ваш счетчик сообщений был сброшен. Спасибо за обращение!")
+                            if admin_id != user_id and can_send_message(admin_id):
+                                try:
+                                    send_message(
+                                        admin_id,
+                                        f"Администратор {admin_name} взял в работу заявку от {mention}."
+                                    )
+                                except Exception as e:
+                                    print(f"Ошибка при уведомлении администратора {admin_id}: {e}")
+
+                    conn.commit()
                     continue
 
-                elif payload.get('action') == "respond":
-                    user_to_ignore = payload.get('user_id')
-                    cursor.execute("UPDATE users SET is_ignored = 1 WHERE user_id = ?", (user_to_ignore,))
-                    conn.commit()
-                    send_message(peer_id,
-                                 f"Вы откликнулись на запрос пользователя [id{user_to_ignore}|]. Бот будет игнорировать его сообщения.")
-                    continue
             except json.JSONDecodeError:
                 pass
 
-        # Проверяем, находится ли пользователь в режиме игнора
+        # Проверяем игнор
         cursor.execute("SELECT is_ignored FROM users WHERE user_id = ?", (user_id,))
         result = cursor.fetchone()
         is_ignored = result[0] if result else 0
 
         if is_ignored:
-            print(f"Сообщение от user_id {user_id} игнорируется.")
-            keyboard = VkKeyboard(one_time=True)
-            keyboard.add_button('Я получил помощь', color=VkKeyboardColor.POSITIVE,
-                                payload=json.dumps({"action": "reset_counter"}))
-            send_message(
-                peer_id,text="заготовленные ответы игнорируются",
-                keyboard=keyboard.get_keyboard()
-            )
+            cursor.execute("SELECT message_count FROM users WHERE user_id = ?", (user_id,))
+            message_count = cursor.fetchone()[0]
+            if message_count >= 5:
+                keyboard = VkKeyboard(one_time=True)
+                keyboard.add_button(
+                    'Я получил помощь',
+                    color=VkKeyboardColor.POSITIVE,
+                    payload=json.dumps({"action": "reset_counter"})
+                )
+                send_message(
+                    peer_id,
+                    "✅",  # Пустой текст, так как есть стикер
+                    keyboard=keyboard.get_keyboard(),
+                    attachment="sticker_id=9019"  # Стикер вместо текста
+                )
+
             continue
 
-        # Обработка существующих команд администратора
+        # Команды администратора
         if msg_text == "/stats_users" and user_id in ADMIN_ID:
             stats = get_user_stats()
             if stats:
@@ -335,21 +423,25 @@ for event in longpoll.listen():
         cursor.execute("SELECT message_count FROM users WHERE user_id = ?", (user_id,))
         message_count = cursor.fetchone()[0]
 
-        # Если пользователь отправил 5 сообщений, уведомляем админов и отправляем кнопку
         if message_count == 5:
             for admin_id in ADMIN_ID:
                 if can_send_message(admin_id):
                     cursor.execute("SELECT first_name, last_name FROM users WHERE user_id = ?", (user_id,))
                     first_name, last_name = cursor.fetchone()
                     mention = f"[id{user_id}|{first_name} {last_name}]"
-                    message_text = f"Пользователь {mention} отправил 5 сообщений и возможно нуждается в помощи."
-                    keyboard = VkKeyboard(one_time=True)
-                    keyboard.add_button('Откликнуться', color=VkKeyboardColor.PRIMARY,
-                                        payload={"action": "respond", "user_id": user_id})
+                    message_text = f"Пользователь {mention} отправил 5 сообщений и нуждается в помощи."
+                    keyboard = VkKeyboard(inline=True)
+                    keyboard.add_button(
+                        'Откликнуться',
+                        color=VkKeyboardColor.PRIMARY,
+                        payload={"action": "respond", "page": 0}
+                    )
                     send_message(admin_id, message_text, keyboard=keyboard.get_keyboard())
                 else:
                     print(f"Невозможно отправить сообщение администратору {admin_id}: нет разрешения")
+
         if message_count >= 5:
+            cursor.execute("UPDATE users SET needs_help = 1 WHERE user_id = ?", (user_id,))
             keyboard = VkKeyboard(one_time=True)
             keyboard.add_button('Я получил помощь', color=VkKeyboardColor.POSITIVE, payload={"action": "reset_counter"})
             send_message(peer_id,
