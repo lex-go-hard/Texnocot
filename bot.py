@@ -1,3 +1,288 @@
+<<<<<<< HEAD
+import vk_api
+from vk_api.bot_longpoll import VkBotLongPoll, VkBotEventType
+import sqlite3
+from dotenv import load_dotenv
+import os
+import json
+
+# Загрузка переменных окружения
+load_dotenv("keys.env")
+GROUP_TOKEN = os.getenv('GROUP_TOKEN')
+GROUP_ID = int(os.getenv('GROUP_ID'))  # Положительный ID группы
+ADMIN_ID = int(os.getenv('ADMIN_ID'))
+ADMIN_ID2 = int(os.getenv('ADMIN_ID2'))
+USER_TOKEN = os.getenv('USER_TOKEN')  # Токен пользователя
+
+# Подключение к базе данных
+conn = sqlite3.connect('bot_db.sqlite')
+cursor = conn.cursor()
+
+
+# ✅ Функция для создания таблиц, если их нет
+def create_tables():
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS keywords (
+            keyword TEXT PRIMARY KEY,
+            response TEXT
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS message_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            keyword TEXT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    conn.commit()
+    print("✅ Таблицы проверены/созданы.")
+
+
+# 📄 Создание таблиц при запуске
+create_tables()
+
+# Инициализация VK API
+vk_session = vk_api.VkApi(token=GROUP_TOKEN)
+longpoll = VkBotLongPoll(vk_session, GROUP_ID)
+vk = vk_session.get_api()
+
+# Инициализация пользовательского VK API для создания чата и опроса
+try:
+    user_vk_session = vk_api.VkApi(token=USER_TOKEN)
+    user_vk = user_vk_session.get_api()
+except vk_api.exceptions.ApiError as e:
+    print(f"Ошибка инициализации USER_TOKEN: {e}")
+    raise SystemExit("Проверьте USER_TOKEN в keys.env и убедитесь, что он действителен.")
+
+
+# 📩 Функция для отправки сообщений
+def send_message(peer_id, text):
+    vk.messages.send(
+        peer_id=peer_id,
+        message=text,
+        random_id=0
+    )
+
+
+# 📊 Получение статистики
+def get_admin_stats():
+    cursor.execute('''
+        SELECT keyword, COUNT(*) as count,
+               (COUNT(*) * 100.0 / (SELECT COUNT(*) FROM message_log)) as percent
+        FROM message_log
+        GROUP BY keyword
+        ORDER BY count DESC
+    ''')
+    return cursor.fetchall()
+
+
+# 📨 Функция для получения списка подписчиков
+def get_group_members():
+    members = vk.groups.getMembers(group_id=GROUP_ID)['items']
+    return members
+
+
+# 🆕 Функция для получения списка администраторов группы
+def get_group_admins():
+    try:
+        admins = vk.groups.getMembers(group_id=GROUP_ID, filter='managers')['items']
+        print(f"Полученные администраторы: {admins}")  # Отладка
+        return [admin['id'] for admin in admins]
+    except Exception as e:
+        print(f"Ошибка в get_group_admins: {e}")
+        return None
+
+
+# 🆕 Функция для создания чата сообщества с администраторами
+def create_admin_chat(chat_title):
+    try:
+        # Получаем список администраторов
+        admins = get_group_admins()
+        if admins is None or not admins:
+            return None, "Не удалось получить список администраторов или список пуст."
+
+        # Получаем ID бота через USER_TOKEN
+        bot_info = user_vk_session.method('users.get')
+        if not bot_info or len(bot_info) == 0:
+            return None, "Не удалось определить ID бота через USER_TOKEN."
+        bot_id = bot_info[0]['id']
+        print(f"ID бота: {bot_id}")  # Отладка
+
+        # Исключаем бота из списка администраторов
+        admin_ids = [admin_id for admin_id in admins if admin_id != bot_id]
+        print(f"Администраторы после фильтрации: {admin_ids}")  # Отладка
+
+        if not admin_ids:
+            return None, "Нет администраторов для добавления в чат (бот исключён)."
+
+        # Создаём чат с администраторами через пользовательский токен
+        chat_id = user_vk.messages.createChat(
+            user_ids=admin_ids[:10],  # Ограничение метода — до 10 участников при создании
+            title=chat_title
+        )
+
+        # Если администраторов больше 10, добавляем оставшихся
+        if len(admin_ids) > 10:
+            remaining_admins = admin_ids[10:50]  # Ограничение до 50 за раз
+            vk.messages.addChatUsers(
+                chat_id=chat_id,
+                user_ids=remaining_admins
+            )
+
+        return chat_id, admin_ids
+    except vk_api.exceptions.ApiError as e:
+        return None, f"Ошибка VK API: {e}"
+    except Exception as e:
+        return None, f"Неизвестная ошибка: {e}"
+
+
+# Флаг для ожидания сообщения для рассылки
+awaiting_news_message = False
+
+# Флаги для создания опроса
+awaiting_poll_question = False
+awaiting_poll_options = False
+awaiting_poll_settings = False
+poll_question = ""
+poll_options = []
+
+# Флаги для команды /group
+awaiting_chat_title = False
+
+# 🛠️ Основной цикл обработки событий
+for event in longpoll.listen():
+    if event.type == VkBotEventType.MESSAGE_NEW:
+        message = event.object.message
+        msg_text = message['text'].lower()
+        user_id = message['from_id']
+        peer_id = message['peer_id']
+
+        print(f"📩 Сообщение: '{msg_text}' от user_id: {user_id} | peer_id: {peer_id}")
+
+        # 👨‍💻 Обработка команды админа /stats
+        if msg_text == "/stats" and (user_id == ADMIN_ID or user_id == ADMIN_ID2):
+            stats = get_admin_stats()
+            response = "📊 Статистика вопросов:\n"
+            for keyword, count, percent in stats:
+                response += f"- {keyword}: {count} ({round(percent, 2)}%)\n"
+            send_message(peer_id, response)
+            continue
+
+        # 👨‍💻 Обработка команды админа /group
+        if msg_text == "/group" and (user_id == ADMIN_ID or user_id == ADMIN_ID2):
+            send_message(peer_id, "Введите название нового:")
+            awaiting_chat_title = True
+            continue
+
+        # Если бот ожидает название чата для /group
+        if awaiting_chat_title and (user_id == ADMIN_ID or user_id == ADMIN_ID2):
+            chat_title = message['text']
+            chat_id, result = create_admin_chat(chat_title)
+            if chat_id:
+                admin_ids = result
+                admin_list = "\n".join([f"- {aid}" for aid in admin_ids])
+                send_message(peer_id, f"✅ Чат '{chat_title}' создан (ID: {chat_id + 2000000000}).\n"
+                                      f"А:\n{admin_list}")
+            else:
+                send_message(peer_id, f"❌ Ошибка при создании чата: {result}")
+            awaiting_chat_title = False
+            continue
+
+        # 👨‍💻 Обработка команды админа /poll
+        if msg_text == "/poll" and (user_id == ADMIN_ID or user_id == ADMIN_ID2):
+            send_message(peer_id, "Введите вопрос для опроса:")
+            awaiting_poll_question = True
+            continue
+
+        # Если бот ожидает вопрос для опроса
+        if awaiting_poll_question and (user_id == ADMIN_ID or user_id == ADMIN_ID2):
+            poll_question = msg_text
+            send_message(peer_id, "Введите варианты ответа в формате '1. ответ; 2. ответ':")
+            awaiting_poll_question = False
+            awaiting_poll_options = True
+            continue
+
+        # Если бот ожидает варианты ответа
+        if awaiting_poll_options and (user_id == ADMIN_ID or user_id == ADMIN_ID2):
+            poll_options = [option.strip() for option in msg_text.split(';')]
+            send_message(peer_id, "Введите характеристики опроса (цифры через пробел):\n"
+                                  "1. Анонимный опрос\n"
+                                  "2. Выбор нескольких вариантов\n"
+                                  "3. Запретить отмену голоса\n"
+                                  "Если таких характеристик нет, напишите 0 0 0.")
+            awaiting_poll_options = False
+            awaiting_poll_settings = True
+            continue
+
+        # Если бот ожидает характеристики опроса
+        if awaiting_poll_settings and (user_id == ADMIN_ID or user_id == ADMIN_ID2):
+            settings = msg_text.split(" ")
+            is_anonymous = '1' in settings
+            is_multiple = '2' in settings
+            disable_unvote = '3' in settings
+
+            try:
+                # Создание JSON-строки для вариантов ответов
+                answers_json = json.dumps([option for option in poll_options], ensure_ascii=False)
+
+                # Создание опроса через user-token
+                if settings and settings != ["0", "0", "0"]:
+                    poll = user_vk.polls.create(
+                        question=poll_question,
+                        add_answers=answers_json,
+                        owner_id=ADMIN_ID,
+                        is_anonymous=is_anonymous,
+                        is_multiple=is_multiple,
+                        disable_unvote=disable_unvote
+                    )
+                else:
+                    poll = user_vk.polls.create(
+                        question=poll_question,
+                        add_answers=answers_json,
+                        owner_id=ADMIN_ID
+                    )
+
+                # Создание поста с опросом в группе
+                post = vk.wall.post(
+                    owner_id=-GROUP_ID,
+                    message="Пожалуйста, пройдите опрос!",
+                    attachments=f"poll{poll['owner_id']}_{poll['id']}"
+                )
+
+                send_message(peer_id, "✅ Опрос создан и опубликован на стене сообщества.")
+            except Exception as e:
+                send_message(peer_id, f"❌ Ошибка при создании опроса: {e}")
+                print(f"Ошибка при создании опроса: {e}")
+
+            awaiting_poll_settings = False
+            poll_question, poll_options = "", []
+            continue
+
+        # 🔍 Поиск ключевых слов
+        cursor.execute("SELECT keyword, response FROM keywords")
+        keywords = cursor.fetchall()
+        response = None
+        matched_keyword = None
+
+        for keyword, resp in keywords:
+            if keyword in msg_text:
+                response = resp
+                matched_keyword = keyword
+                break
+
+        # 📝 Ответ пользователю
+        if response:
+            send_message(peer_id, response)
+            cursor.execute('''
+                INSERT INTO message_log (user_id, keyword)
+                VALUES (?, ?)
+            ''', (user_id, matched_keyword))
+        else:
+            send_message(peer_id, "❌ Не понимаю ваш вопрос. Опишите его подробнее.")
+
+        conn.commit()
+=======
 import json
 import os
 import sqlite3
@@ -357,3 +642,4 @@ for event in longpoll.listen():
                          keyboard=keyboard.get_keyboard())
 
         conn.commit()
+>>>>>>> origin/master
